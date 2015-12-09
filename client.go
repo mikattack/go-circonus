@@ -1,7 +1,8 @@
 package circonus
 
 import (
-"fmt"
+//"fmt"
+"io"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -121,7 +122,7 @@ func (c *Client) send(r request) (interface{}, error) {
 	encoded_data := new(bytes.Buffer)
 	if r.Data != nil {
 		if encoded, err := json.Marshal(r.Data); err != nil {
-			return nil, err
+			return nil, errors.New("Cannot encode request data: " + err.Error())
 		} else {
 			encoded_data = bytes.NewBuffer(encoded)
 		}
@@ -129,7 +130,7 @@ func (c *Client) send(r request) (interface{}, error) {
 
 	// Create request
 	url := c.host + c.path + r.Resource
-	fmt.Printf("URL: %s\n", url)
+	///////////////////fmt.Printf("URL: %s\n", url)
 	req, err := http.NewRequest(r.Method, url, encoded_data)
 	if err != nil {
 		return nil, err		// Should only occur with malformed request URL's
@@ -151,14 +152,28 @@ func (c *Client) send(r request) (interface{}, error) {
 		}
 		defer res.Body.Close()
 
-		decoder := json.NewDecoder(res.Body)
-		fmt.Printf("CODE: %d\n", res.StatusCode)
-		fmt.Printf("STATUS: %s\n", res.Status)
+		// REMOVE THIS DEBUG CODE ///////////////////////////////////////////////
+		buffer := new(bytes.Buffer)
+	  if _, err := io.Copy(buffer, res.Body); err != nil {
+	    return errors.New("Failed to buffer the request body")
+	  }
+	  decoder := json.NewDecoder(bytes.NewReader(buffer.Bytes()))
+	  /////////////////////////////////////////////////////////////////////////
+
+		//decoder := json.NewDecoder(res.Body)
+
+		///////////////////fmt.Printf("CODE: %d\n", res.StatusCode)
+		///////////////////fmt.Printf("STATUS: %s\n", res.Status)
 		if res.StatusCode > 399 {
+			if res.StatusCode == 404 {
+				return errors.New("Circonus endpoint \"" + r.Resource + "\" not found")
+			}
+
 			// Parse response as an Error
 			var errorResult CirconusError
 			if err := decoder.Decode(&errorResult); err != nil {
-				return err
+				return errors.New(buffer.String())
+				//return errors.New("Failed to decode server response")
 			} else {
 				return errorResult
 			}
@@ -167,8 +182,9 @@ func (c *Client) send(r request) (interface{}, error) {
 			if err := decoder.Decode(&result); err != nil {
 				if err.Error() == "EOF" {
 					return errors.New("Empty response from Circonus")
+				} else {
+					return errors.New("Malformed response from Circonus")
 				}
-				return err
 			} else {
 				return nil
 			}
