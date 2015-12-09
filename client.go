@@ -1,111 +1,130 @@
 package circonus
 
 import (
-//"fmt"
-"io"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
 	"golang.org/x/net/context"
 )
 
+// Structures ============================================================ //
 
 type Client struct {
-	Timeout		time.Duration
-	app				string					// Circonus: Application name
-	host			string					// Cironus API host
-	path			string					// Base URL path of any requests made
-	token			string					// Circonus: API token
-	transport	*http.Transport	// For testing
-}
-
-type CirconusError struct {
-	Code					string		`json:"code"`
-	Explanation		string		`json:"explanation"`
-	Message				string		`json:"message"`
-	Reference			string		`json:"reference"`
-	Tag						string		`json:"tag"`
-	Server				string		`json:"server"`
+	Timeout   time.Duration
+	app       string          // Circonus: Application name
+	host      string          // Cironus API host
+	path      string          // Base URL path of any requests made
+	token     string          // Circonus: API token
+	transport *http.Transport // For testing
 }
 
 type request struct {
-	Method			string
-	Action			string
-	Resource		string
-	Data				interface{}
-	Parameters	map[string]string
+	Method     string
+	Action     string
+	Resource   string
+	Data       interface{}
+	Parameters map[string]string
 }
 
 type key int
+type resource string
 type responseHandler func(*http.Response, error) error
 
+// Errors ================================================================ //
+
+type CirconusError struct {
+	Code        string `json:"code"`
+	Explanation string `json:"explanation"`
+	Message     string `json:"message"`
+	Reference   string `json:"reference"`
+	Tag         string `json:"tag"`
+	Server      string `json:"server"`
+}
+
+func (e CirconusError) Error() string {
+	return e.Explanation
+}
+
+type EmptyResponseError struct{}
+
+func (e EmptyResponseError) Error() string {
+	return "Empty response from Circonus"
+}
+
+type MalformedResponseError struct {
+	Reason string
+}
+
+func (e MalformedResponseError) Error() string {
+	return "Malformed JSON response from Circonus"
+}
+
+type RequestDataError struct {
+	Reason string
+}
+
+func (e RequestDataError) Error() string {
+	return "Cannot encode request data"
+}
+
+type ResourceNotFoundError struct {
+	Endpoint string
+}
+
+func (e ResourceNotFoundError) Error() string {
+	return "Circonus endpoint \"" + e.Endpoint + "\" not found"
+}
+
+// Constants & Data ====================================================== //
 
 // External constants
 var (
 	DEFAULT_TIMEOUT time.Duration = time.Duration(30) * time.Second
 
 	// Supported resources
-	ACCOUNT					string = "account"
-	BROKER					string = "broker"
-	CHECK						string = "check"
-	CHECK_BUNDLE		string = "checkbundle"
-	CONTACT_GROUP		string = "contact_group"
-	GRAPH						string = "graph"
-	RULE_SET				string = "rule_set"
-	RULE_SET_GROUP	string = "rule_set_group"
-	TEMPLATE				string = "template"
-	USER						string = "user"
-
+	ACCOUNT        resource = "account"
+	BROKER         resource = "broker"
+	CHECK          resource = "check"
+	CHECK_BUNDLE   resource = "checkbundle"
+	CONTACT_GROUP  resource = "contact_group"
+	GRAPH          resource = "graph"
+	RULE_SET       resource = "rule_set"
+	RULE_SET_GROUP resource = "rule_set_group"
+	TEMPLATE       resource = "template"
+	USER           resource = "user"
 )
 
 // Internal constants
 var (
-	default_host			string = "https://api.circonus.com"
+	default_host      string = "https://api.circonus.com"
 	supported_version string = "v2"
-	retries						int = 5
+	retries           int    = 5
 
-	clientTransport		key = 0
+	clientTransport key = 0
 )
 
-
-func (e CirconusError) Error() string {
-	return e.Explanation
-}
-
+// Circonus API ========================================================== //
 
 func NewClient(appname string, apitoken string) Client {
-	return Client {
-		Timeout:		DEFAULT_TIMEOUT,
-		app:				appname,
-		host:				default_host,
-		path:				"/" + supported_version,
-		token:			apitoken,
-		transport:	&http.Transport { },
+	return Client{
+		Timeout:   DEFAULT_TIMEOUT,
+		app:       appname,
+		host:      default_host,
+		path:      "/" + supported_version,
+		token:     apitoken,
+		transport: &http.Transport{},
 	}
 }
-
-
-// DEBUG
-func (c *Client) List(resource string) (interface{}, error) {
-	req := request {
-		Method:			"GET",
-		Action:			"list",
-		Resource:		resource,
-	}
-	return c.send(req)
-}
-
 
 func (c *Client) send(r request) (interface{}, error) {
 	var (
-		ctx			context.Context
-		cancel	context.CancelFunc
-		result  interface{}
+		ctx    context.Context
+		cancel context.CancelFunc
+		result interface{}
 	)
- 
+
 	// Set request cancellation policy.  By default, cancellation occurs when
 	// a timeout expires.  Setting a zero timeout requires manual cancellation.
 	if c.Timeout.Seconds() == 0 {
@@ -122,7 +141,7 @@ func (c *Client) send(r request) (interface{}, error) {
 	encoded_data := new(bytes.Buffer)
 	if r.Data != nil {
 		if encoded, err := json.Marshal(r.Data); err != nil {
-			return nil, errors.New("Cannot encode request data: " + err.Error())
+			return nil, RequestDataError{Reason: err.Error()}
 		} else {
 			encoded_data = bytes.NewBuffer(encoded)
 		}
@@ -130,10 +149,9 @@ func (c *Client) send(r request) (interface{}, error) {
 
 	// Create request
 	url := c.host + c.path + r.Resource
-	///////////////////fmt.Printf("URL: %s\n", url)
 	req, err := http.NewRequest(r.Method, url, encoded_data)
 	if err != nil {
-		return nil, err		// Should only occur with malformed request URL's
+		return nil, err // Should only occur with malformed request URL's
 	}
 
 	// Add any querystring parameters
@@ -152,28 +170,17 @@ func (c *Client) send(r request) (interface{}, error) {
 		}
 		defer res.Body.Close()
 
-		// REMOVE THIS DEBUG CODE ///////////////////////////////////////////////
-		buffer := new(bytes.Buffer)
-	  if _, err := io.Copy(buffer, res.Body); err != nil {
-	    return errors.New("Failed to buffer the request body")
-	  }
-	  decoder := json.NewDecoder(bytes.NewReader(buffer.Bytes()))
-	  /////////////////////////////////////////////////////////////////////////
+		decoder := json.NewDecoder(res.Body)
 
-		//decoder := json.NewDecoder(res.Body)
-
-		///////////////////fmt.Printf("CODE: %d\n", res.StatusCode)
-		///////////////////fmt.Printf("STATUS: %s\n", res.Status)
 		if res.StatusCode > 399 {
 			if res.StatusCode == 404 {
-				return errors.New("Circonus endpoint \"" + r.Resource + "\" not found")
+				return ResourceNotFoundError{Endpoint: r.Resource}
 			}
 
 			// Parse response as an Error
 			var errorResult CirconusError
 			if err := decoder.Decode(&errorResult); err != nil {
-				return errors.New(buffer.String())
-				//return errors.New("Failed to decode server response")
+				return MalformedResponseError{Reason: err.Error()}
 			} else {
 				return errorResult
 			}
@@ -181,9 +188,9 @@ func (c *Client) send(r request) (interface{}, error) {
 			// Parse successful response
 			if err := decoder.Decode(&result); err != nil {
 				if err.Error() == "EOF" {
-					return errors.New("Empty response from Circonus")
+					return EmptyResponseError{}
 				} else {
-					return errors.New("Malformed response from Circonus")
+					return MalformedResponseError{Reason: err.Error()}
 				}
 			} else {
 				return nil
@@ -196,14 +203,13 @@ func (c *Client) send(r request) (interface{}, error) {
 	return result, err
 }
 
-
-/* 
+/*
  * Runs an http.Request in a goroutine and passes the result to a handler
  * function.  Supports request cancellation via a Context object.
  */
 func executeRequest(ctx context.Context, req *http.Request, fn responseHandler) error {
 	tr := ctx.Value(clientTransport).(*http.Transport)
-	client := &http.Client { Transport:tr }
+	client := &http.Client{Transport: tr}
 	echannel := make(chan error, 1)
 
 	go func() {
@@ -213,9 +219,21 @@ func executeRequest(ctx context.Context, req *http.Request, fn responseHandler) 
 	select {
 	case <-ctx.Done():
 		tr.CancelRequest(req)
-		<- echannel		// Block and wait for fn to return
+		<-echannel // Block and wait for fn to return
 		return ctx.Err()
-	case err := <- echannel:
+	case err := <-echannel:
 		return err
 	}
+}
+
+// Convenience Functions ================================================= //
+
+// DEBUG
+func (c *Client) List(resource string) (interface{}, error) {
+	req := request{
+		Method:   "GET",
+		Action:   "list",
+		Resource: resource,
+	}
+	return c.send(req)
 }

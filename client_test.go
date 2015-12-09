@@ -13,7 +13,7 @@ import (
 
 
 var (
-	defaultTimeout		time.Duration	= time.Duration(3) * time.Second
+	defaultTimeout		time.Duration	= time.Duration(1) * time.Second
 	failureCounter 		int						= 0
 	malformedJson 		string				= "{ count:4 )"
 	successJson 			string				= "{ \"data\":[1,2,3,4] }"
@@ -207,7 +207,7 @@ func successHandler (res http.ResponseWriter, req *http.Request) {
  * Writes a delayed response.
  */
 func timeoutHandler (res http.ResponseWriter, req *http.Request) {
-	time.Sleep(time.Duration(3) * time.Second)
+	time.Sleep(time.Duration(2) * time.Second)
 	res.WriteHeader(http.StatusOK)
 	res.Header().Set("Content-Type", "application/json")
 	fmt.Fprintln(res, successJson)
@@ -231,6 +231,8 @@ func TestSuccess(t *testing.T) {
 		Method:			"GET",
 		Action:			"list",
 		Resource:		"/success",
+		Data:				"test data",
+		Parameters:	map[string]string { "vegetable":"carrot", "rock":"onyx" },
 	}
 
 	_, err := client.send(req)
@@ -258,6 +260,7 @@ func TestFailure(t *testing.T) {
 			t.Errorf("Client error could not be serialized to JSON\n")
 		} else {
 			expect(t, string(decoded), createCirconusError())
+			expect(t, err.Error(), "Intential error")
 		}
 	}
 }
@@ -277,7 +280,8 @@ func TestBadRequestData(t *testing.T) {
 	if err == nil {
 		t.Errorf("Client did not fail as expected\n")
 	} else {
-		t.Logf("%v\n", err)
+		t.Logf("%s\n", err.Error())
+		expect(t, reflect.TypeOf(err).Name(), "RequestDataError")
 	}
 }
 
@@ -295,7 +299,8 @@ func TestBadResource(t *testing.T) {
 	if err == nil {
 		t.Errorf("Client did not fail as expected\n")
 	} else {
-		t.Logf("%v\n", err)
+		t.Logf("%s\n", err.Error())
+		expect(t, reflect.TypeOf(err).Name(), "ResourceNotFoundError")
 	}
 }
 
@@ -313,7 +318,8 @@ func TestEmptyResponse(t *testing.T) {
 	if err == nil {
 		t.Errorf("Client did not fail as expected\n")
 	} else {
-		t.Logf("%v\n", err)
+		t.Logf("%s\n", err.Error())
+		expect(t, reflect.TypeOf(err).Name(), "EmptyResponseError")
 	}
 }
 
@@ -331,8 +337,9 @@ func TestMalformedSuccess(t *testing.T) {
 	if err == nil {
 		t.Errorf("Client did not fail as expected\n")
 	} else {
-		t.Logf("%v\n", err)
-		expect(t, err.Error(), "Malformed response from Circonus")
+		t.Logf("%s\n", err.Error())
+		t.Logf("Reason: %s\n", err.(MalformedResponseError).Reason)
+		expect(t, reflect.TypeOf(err).Name(), "MalformedResponseError")
 	}
 }
 
@@ -350,24 +357,63 @@ func TestMalformedFailure(t *testing.T) {
 	if err == nil {
 		t.Errorf("Client did not fail as expected\n")
 	} else {
-		t.Logf("%v\n", err)
+		t.Logf("%s\n", err.Error())
+		t.Logf("Reason: %s\n", err.(MalformedResponseError).Reason)
+		expect(t, reflect.TypeOf(err).Name(), "MalformedResponseError")
 	}
 }
 
-/*
- * TESTS:
- * 
- * NOTE: 	Tests should not check error strings.  Add error objects to the
- *				client code.
- * 
- * send()
- *	- unencodable request data
- *  - bad request URL
- *	- non-2XX server response
- *  - empty server response
- *  - malformed JSON response to failed request
- *  - malformed JSON response to successful request
- *  - timeout response
- *  - rate limiting response: twice 429, then success
- *  - rate limiting response: always 429
- */
+
+func TestMalformedRequest(t *testing.T) {
+	client := createClient(createTestServer())
+	client.host = "invalid://protocol.com"
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/malformed",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%s\n", err.Error())
+		//expect(t, reflect.TypeOf(err).Name(), "EmptyResponseError")
+	}
+}
+
+
+func TestTimout(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/timeout",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%s\n", err.Error())
+	}
+}
+
+
+func TestZeroTimout(t *testing.T) {
+	client := createClient(createTestServer())
+	client.Timeout = 0
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/timeout",
+	}
+
+	_, err := client.send(req)
+	if err != nil {
+		t.Errorf("Client timed out despite having no timeout set\n")
+	}
+}
