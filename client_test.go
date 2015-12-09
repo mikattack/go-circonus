@@ -1,11 +1,12 @@
 package circonus
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -17,6 +18,13 @@ var (
 	malformedJson 		string				= "{ count:4 )"
 	successJson 			string				= "{ \"data\":[1,2,3,4] }"
 )
+
+
+func expect(t *testing.T, a interface{}, b interface{}) {
+	if a != b {
+		t.Errorf("Expected \"%v\" (%s), got \"%v\" (%s)", b, reflect.TypeOf(b), a, reflect.TypeOf(a))
+	}
+}
 
 
 // Factory Functions ===================================================== //
@@ -47,11 +55,9 @@ func createCirconusError() string {
  * Creates a Client configured for testing.
  * 
  * Arguments:
- *		proxy		URL path all requests from the Client should proxy to.  This
- *						path should be prefixed with a slash.
  *		server	Server Client requests will be proxied to.
  */
-func createClient(proxy string, server *httptest.Server) Client {
+func createClient(server *httptest.Server) Client {
 	serverURL, err := url.Parse(server.URL)
 
 	tr := &http.Transport {
@@ -65,7 +71,6 @@ func createClient(proxy string, server *httptest.Server) Client {
 	client.host = serverURL.String()
 	client.path = ""
 	client.transport = tr
-	fmt.Printf("%v\n", client)
 	return client
 }
 
@@ -88,6 +93,7 @@ func createClient(proxy string, server *httptest.Server) Client {
 func createTestServer() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/empty", 							emptyHandler)
+	mux.HandleFunc("/failure",						failureHandler)
 	mux.HandleFunc("/malformed-failure",	malformedFailureHandler)
 	mux.HandleFunc("/malformed-success",	malformedSuccessHandler)
 	mux.HandleFunc("/rate-limit-partial",	rateLimitPartialHandler)
@@ -110,6 +116,17 @@ func emptyHandler (res http.ResponseWriter, req *http.Request) {
 	res.WriteHeader(http.StatusOK)
 	res.Header().Set("Content-Type", "application/json")
 	fmt.Fprintln(res, "")
+}
+
+
+/* 
+ * Writes a failed response with a well-formed Circonus error
+ * as the body content.
+ */
+func failureHandler (res http.ResponseWriter, req *http.Request) {
+	res.WriteHeader(http.StatusInternalServerError)
+	res.Header().Set("Content-Type", "application/json")
+	fmt.Fprintln(res, createCirconusError())
 }
 
 
@@ -202,14 +219,13 @@ func timeoutHandler (res http.ResponseWriter, req *http.Request) {
 
 /* 
  * NOTE:
- *		All methods of the client behave the same way, so we only
- *		need to test transport-specific edge cases.
+ *		All methods of the client behave the same way, so we only need
+ *		to test behavior and edge cases that affect all request types.
  */
 
 
 func TestSuccess(t *testing.T) {
-	server := createTestServer()
-	client := createClient("/success", server)
+	client := createClient(createTestServer())
 
 	req := request {
 		Method:			"GET",
@@ -217,16 +233,132 @@ func TestSuccess(t *testing.T) {
 		Resource:		"/success",
 	}
 
-	res, err := client.send(req)
+	_, err := client.send(req)
 	if err != nil {
-		t.Errorf("[ERROR] %s\n", err.Error())
+		t.Errorf("%s\n", err.Error())
+	}
+}
+
+
+func TestFailure(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/failure",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
 	} else {
-		t.Logf("%v\n", res)
+		decoded, jerr := json.Marshal(err)
+		if jerr != nil {
+			t.Errorf("Client error could not be serialized to JSON\n")
+		} else {
+			expect(t, string(decoded), createCirconusError())
+		}
+	}
+}
+
+
+func TestBadRequestData(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/success",
+		Data:				make(chan bool),
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%v\n", err)
+	}
+}
+
+
+func TestBadResource(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/nonexistent",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%v\n", err)
+	}
+}
+
+
+func TestEmptyResponse(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/empty",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%v\n", err)
+	}
+}
+
+
+func TestMalformedSuccess(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/malformed-success",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%v\n", err)
+		expect(t, err.Error(), "Malformed response from Circonus")
+	}
+}
+
+
+func TestMalformedFailure(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/malformed-failure",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%v\n", err)
 	}
 }
 
 /*
  * TESTS:
+ * 
+ * NOTE: 	Tests should not check error strings.  Add error objects to the
+ *				client code.
  * 
  * send()
  *	- unencodable request data
