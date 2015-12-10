@@ -7,16 +7,18 @@ import (
 	"net/http"
 	"time"
 
-	"golang.org/x/net/context"
+	//"golang.org/x/net/context"
 )
 
 // Structures ============================================================ //
 
 type Client struct {
+	Retries   int
 	Timeout   time.Duration
 	app       string          // Circonus: Application name
 	host      string          // Cironus API host
 	path      string          // Base URL path of any requests made
+	results   chan result			// Used to limit client to a one request at a time
 	token     string          // Circonus: API token
 	transport *http.Transport // For testing
 }
@@ -27,6 +29,11 @@ type request struct {
 	Resource   string
 	Data       interface{}
 	Parameters map[string]string
+}
+
+type result struct {
+	Response	interface{}
+	Error			error
 }
 
 type key int
@@ -66,6 +73,12 @@ type RateLimitError struct {}
 
 func (e RateLimitError) Error() string {
 	return "Request was rate limited"
+}
+
+type RateLimitExceededError struct {}
+
+func (e RateLimitExceededError) Error() string {
+	return "Request exceeded rate limit and exhausted retries"
 }
 
 type RequestDataError struct {
@@ -111,62 +124,65 @@ var (
 	supported_version string = "v2"
 	retries           int    = 5
 
-	clientTransport key = 0
+	clientTransport   key = 0
 )
 
 // Circonus API ========================================================== //
 
 func NewClient(appname string, apitoken string) Client {
 	return Client{
+		Retries:   DEFAULT_RETRY_ATTEMPTS,
 		Timeout:   DEFAULT_TIMEOUT,
 		app:       appname,
 		host:      default_host,
 		path:      "/" + supported_version,
+		results:   make(chan result),
 		token:     apitoken,
 		transport: &http.Transport{},
 	}
 }
 
 func (c *Client) send(r request) (interface{}, error) {
-	var result interface{}
+	var res interface{}
 	var err error
 
-	for i := 0; i < DEFAULT_RETRY_ATTEMPTS; i++ {
-		result, err = c.tryRequest(r)
-		if err != nil {
-			switch err.(type) {
-			case RateLimitError:
-				time.Sleep(DEFAULT_RETRY_INTERVAL)
-				fmt.Printf("Retrying (%d)\n", i + 1)
-				continue
-			default:
-				break
-			}
-		}
-		fmt.Printf("Hmmm...\n")  // NOTE: We need to block on retries
-	}
+	go func(req request, channel chan result) {
+		for i := 0; i < c.Retries; i++ {
+			res, err = c.tryRequest(r, c.results)
 
-	return result, err
+			if err != nil {
+				switch err.(type) {
+				case RateLimitError:
+					<- time.Tick(DEFAULT_RETRY_INTERVAL)
+					fmt.Printf("Retrying (%d)\n", i + 1)
+					if i == c.Retries - 1 {
+						err = RateLimitExceededError{}
+					}
+					continue
+				default:
+					break  // Stop on general errors
+				}
+			}
+
+			break  // Stop immediately upon success
+		}
+		channel <- result{
+			Response: res,
+			Error:    err,
+		}
+	}(r, c.results)
+
+	// Await successful response or maximum retries
+	for {
+		select {
+			case res := <- c.results:
+				return res.Response, res.Error
+		}
+	}
 }
 
-func (c *Client) tryRequest(r request) (interface{}, error) {
-	var (
-		ctx    context.Context
-		cancel context.CancelFunc
-		result interface{}
-	)
-
-	// Set request cancellation policy.  By default, cancellation occurs when
-	// a timeout expires.  Setting a zero timeout requires manual cancellation.
-	if c.Timeout.Seconds() == 0 {
-		ctx, cancel = context.WithCancel(context.Background())
-	} else {
-		ctx, cancel = context.WithTimeout(context.Background(), c.Timeout)
-	}
-	defer cancel()
-
-	// Attach transport to context
-	ctx = context.WithValue(ctx, clientTransport, c.transport)
+func (c *Client) tryRequest(r request, channel chan result) (interface{}, error) {
+	var response interface{}
 
 	// Encode data as JSON
 	encoded_data := new(bytes.Buffer)
@@ -182,7 +198,7 @@ func (c *Client) tryRequest(r request) (interface{}, error) {
 	url := c.host + c.path + r.Resource
 	req, err := http.NewRequest(r.Method, url, encoded_data)
 	if err != nil {
-		return nil, err // Should only occur with malformed request URL's
+		return nil, err  // Should only occur with malformed request URL's
 	}
 
 	// Add any querystring parameters
@@ -194,75 +210,53 @@ func (c *Client) tryRequest(r request) (interface{}, error) {
 		req.URL.RawQuery = q.Encode()
 	}
 
-	// Define a response handler closure
-	resHandler := func(res *http.Response, err error) error {
-		if err != nil {
-			return err
-		}
-		defer res.Body.Close()
-
-		decoder := json.NewDecoder(res.Body)
-
-		if res.StatusCode > 399 {
-			if res.StatusCode == 404 {
-				return ResourceNotFoundError{Endpoint: r.Resource}
-			}
-			if res.StatusCode == 429 {
-				return RateLimitError{}
-			}
-
-			// Parse response as an Error
-			var errorResult CirconusError
-			if err := decoder.Decode(&errorResult); err != nil {
-				return MalformedResponseError{Reason: err.Error()}
-			} else {
-				return errorResult
-			}
-		} else {
-			// Parse successful response
-			if err := decoder.Decode(&result); err != nil {
-				if err.Error() == "EOF" {
-					return EmptyResponseError{}
-				} else {
-					return MalformedResponseError{Reason: err.Error()}
-				}
-			} else {
-				return nil
-			}
-		}
+	client := &http.Client{
+		Timeout:   c.Timeout,
+		Transport: c.transport,
 	}
 
 	// Execute request
-	err = executeRequest(ctx, req, resHandler)
-	return result, err
-}
-
-/*
- * Runs an http.Request in a goroutine and passes the result to a handler
- * function.  Supports request cancellation via a Context object.
- */
-func executeRequest(ctx context.Context, req *http.Request, fn responseHandler) error {
-	tr := ctx.Value(clientTransport).(*http.Transport)
-	client := &http.Client{Transport: tr}
-	echannel := make(chan error, 1)
-
-	go func() {
-		echannel <- fn(client.Do(req))
-	}()
-
-	select {
-	case <-ctx.Done():
-		tr.CancelRequest(req)
-		<-echannel // Block and wait for fn to return
-		return ctx.Err()
-	case err := <-echannel:
-		return err
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
+	defer res.Body.Close()
+
+	decoder := json.NewDecoder(res.Body)
+
+	// Handle errors
+	if res.StatusCode > 399 {
+		if res.StatusCode == 404 {
+			return nil, ResourceNotFoundError{Endpoint: r.Resource}
+		}
+		if res.StatusCode == 429 {
+			return nil, RateLimitError{}
+		}
+
+		// Parse response as an Error
+		var errorResult CirconusError
+		if err := decoder.Decode(&errorResult); err != nil {
+			return nil, MalformedResponseError{Reason: err.Error()}
+		} else {
+			return nil, errorResult
+		}
+	}
+
+	// Parse successful response
+	if err := decoder.Decode(&response); err != nil {
+		if err.Error() == "EOF" {
+			return nil, EmptyResponseError{}
+		} else {
+			return nil, MalformedResponseError{Reason: err.Error()}
+		}
+	}
+
+	return response, nil
 }
 
 // Convenience Functions ================================================= //
 
-// DEBUG
+/*
 func (c *Client) List(resource string) (interface{}, error) {
 	req := request{
 		Method:   "GET",
@@ -271,3 +265,4 @@ func (c *Client) List(resource string) (interface{}, error) {
 	}
 	return c.send(req)
 }
+*/
