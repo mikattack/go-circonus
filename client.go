@@ -1,6 +1,7 @@
 package circonus
 
 import (
+"fmt"
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -61,6 +62,12 @@ func (e MalformedResponseError) Error() string {
 	return "Malformed JSON response from Circonus"
 }
 
+type RateLimitError struct {}
+
+func (e RateLimitError) Error() string {
+	return "Request was rate limited"
+}
+
 type RequestDataError struct {
 	Reason string
 }
@@ -80,8 +87,10 @@ func (e ResourceNotFoundError) Error() string {
 // Constants & Data ====================================================== //
 
 // External constants
-var (
-	DEFAULT_TIMEOUT time.Duration = time.Duration(30) * time.Second
+const (
+	DEFAULT_TIMEOUT        time.Duration = time.Duration(30) * time.Second
+	DEFAULT_RETRY_ATTEMPTS int = 5
+	DEFAULT_RETRY_INTERVAL time.Duration = time.Duration(1) * time.Second
 
 	// Supported resources
 	ACCOUNT        resource = "account"
@@ -119,6 +128,28 @@ func NewClient(appname string, apitoken string) Client {
 }
 
 func (c *Client) send(r request) (interface{}, error) {
+	var result interface{}
+	var err error
+
+	for i := 0; i < DEFAULT_RETRY_ATTEMPTS; i++ {
+		result, err = c.tryRequest(r)
+		if err != nil {
+			switch err.(type) {
+			case RateLimitError:
+				time.Sleep(DEFAULT_RETRY_INTERVAL)
+				fmt.Printf("Retrying (%d)\n", i + 1)
+				continue
+			default:
+				break
+			}
+		}
+		fmt.Printf("Hmmm...\n")  // NOTE: We need to block on retries
+	}
+
+	return result, err
+}
+
+func (c *Client) tryRequest(r request) (interface{}, error) {
 	var (
 		ctx    context.Context
 		cancel context.CancelFunc
@@ -175,6 +206,9 @@ func (c *Client) send(r request) (interface{}, error) {
 		if res.StatusCode > 399 {
 			if res.StatusCode == 404 {
 				return ResourceNotFoundError{Endpoint: r.Resource}
+			}
+			if res.StatusCode == 429 {
+				return RateLimitError{}
 			}
 
 			// Parse response as an Error
