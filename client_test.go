@@ -13,7 +13,7 @@ import (
 
 
 var (
-	defaultTimeout		time.Duration	= time.Duration(1) * time.Second
+	defaultTimeout		time.Duration	= time.Duration(500) * time.Millisecond
 	failureCounter 		int						= 0
 	malformedJson 		string				= "{ count:4 )"
 	successJson 			string				= "{ \"data\":[1,2,3,4] }"
@@ -207,7 +207,7 @@ func successHandler (res http.ResponseWriter, req *http.Request) {
  * Writes a delayed response.
  */
 func timeoutHandler (res http.ResponseWriter, req *http.Request) {
-	time.Sleep(time.Duration(2) * time.Second)
+	time.Sleep(time.Duration(550) * time.Millisecond)
 	res.WriteHeader(http.StatusOK)
 	res.Header().Set("Content-Type", "application/json")
 	fmt.Fprintln(res, successJson)
@@ -379,7 +379,6 @@ func TestMalformedRequest(t *testing.T) {
 		t.Errorf("Client did not fail as expected\n")
 	} else {
 		t.Logf("%s\n", err.Error())
-		//expect(t, reflect.TypeOf(err).Name(), "EmptyResponseError")
 	}
 }
 
@@ -415,5 +414,42 @@ func TestZeroTimout(t *testing.T) {
 	_, err := client.send(req)
 	if err != nil {
 		t.Errorf("Client timed out despite having no timeout set\n")
+	}
+}
+
+
+func TestFullRateLimit(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/rate-limit-full",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		expect(t, reflect.TypeOf(err).Name(), "RateLimitExceededError")
+		t.Logf("%s\n", err.Error())
+	}
+}
+
+
+func TestPartialRateLimit(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/rate-limit-partial",
+	}
+
+	_, err := client.send(req)
+	if err != nil {
+		t.Errorf("Client failed unexpectedly\n")
+	} else {
+		t.Logf("Client succeeded after retries\n")
 	}
 }
