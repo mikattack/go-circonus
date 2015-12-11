@@ -12,9 +12,16 @@ import (
 )
 
 
+type item struct {
+	Key   string
+	Value string
+}
+
 var (
+	values            chan item     = make(chan item)
 	defaultTimeout		time.Duration	= time.Duration(500) * time.Millisecond
 	failureCounter 		int						= 0
+	listener          valueListener = NewValueListener(values)
 	malformedJson 		string				= "{ count:4 )"
 	successJson 			string				= "{ \"data\":[1,2,3,4] }"
 )
@@ -82,11 +89,11 @@ func createClient(server *httptest.Server) Client {
  * The following resources are exposed:
  * 
  *   /empty								- Empty server response.
+ *   /failure     				- 500 response with valid body content.
  *   /malformed-failure		- 500 response with malformed JSON.
  *   /malformed-success		- 200 response with malformed JSON.
  *   /rate-limit-partial	- 429 response that returns 200 after two attempts.
  *   /rate-limit-full			- Always responses with 429 response.
- *   /server-error				- 500 response with valid body content.
  *   /success							- 200 response with content body.
  *   /timeout							- Slow response.
  */
@@ -94,11 +101,12 @@ func createTestServer() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/empty", 							emptyHandler)
 	mux.HandleFunc("/failure",						failureHandler)
+	mux.HandleFunc("/invalid-token",			invalidTokenHandler)
 	mux.HandleFunc("/malformed-failure",	malformedFailureHandler)
 	mux.HandleFunc("/malformed-success",	malformedSuccessHandler)
+	mux.HandleFunc("/no-access",					noAccessHandler)
 	mux.HandleFunc("/rate-limit-partial",	rateLimitPartialHandler)
 	mux.HandleFunc("/rate-limit-full",		rateLimitFullHandler)
-	mux.HandleFunc("/server-error",				serverErrorHandler)
 	mux.HandleFunc("/success",						successHandler)
 	mux.HandleFunc("/timeout",						timeoutHandler)
 
@@ -106,16 +114,64 @@ func createTestServer() *httptest.Server {
 }
 
 
+// Value Listener ======================================================== //
+
+
+type valueListener struct {
+	channel  chan item
+	signal   chan bool
+	values   map[string]string
+}
+
+func NewValueListener(channel chan item) valueListener {
+	listener := valueListener{
+		channel:  channel,
+		signal:   make(chan bool),
+		values:   make(map[string]string),
+	}
+
+	go func() {
+		for {
+			select {
+			case i := <- listener.channel:
+				listener.values[i.Key] = i.Value
+			case <- listener.signal:
+				listener.values = make(map[string]string)
+			}
+		}
+	}()
+
+	return listener
+}
+
+func (l *valueListener) Values() map[string]string {
+	m := make(map[string]string)
+	for k,v := range l.values {
+		m[k] = v
+	}
+	l.signal <- true
+	return m
+}
+
+
 // HTTP Request Handlers ================================================= //
+
+
+/* 
+ * Convenience function for writing responses with a payload.
+ */
+func respond(res http.ResponseWriter, code int, content interface{}) {
+	res.WriteHeader(code)
+	res.Header().Set("Content-Type", "application/json")
+	fmt.Fprintln(res, content)
+}
 
 
 /* 
  * Writes a successful response with an empty string as the body content.
  */
 func emptyHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(http.StatusOK)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, "")
+	respond(res, http.StatusOK, "")
 }
 
 
@@ -124,9 +180,15 @@ func emptyHandler (res http.ResponseWriter, req *http.Request) {
  * as the body content.
  */
 func failureHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(http.StatusInternalServerError)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, createCirconusError())
+	respond(res, http.StatusInternalServerError, createCirconusError())
+}
+
+
+/* 
+ * Writes a failed response indicating an invalid authentication token.
+ */
+func invalidTokenHandler (res http.ResponseWriter, req *http.Request) {
+	respond(res, http.StatusUnauthorized, createCirconusError())
 }
 
 
@@ -134,9 +196,7 @@ func failureHandler (res http.ResponseWriter, req *http.Request) {
  * Writes a failed response with malformed JSON in the body content.
  */
 func malformedFailureHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(http.StatusInternalServerError)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, malformedJson)
+	respond(res, http.StatusInternalServerError, malformedJson)
 }
 
 
@@ -144,9 +204,15 @@ func malformedFailureHandler (res http.ResponseWriter, req *http.Request) {
  * Writes a successful response with malformed JSON in the body content.
  */
 func malformedSuccessHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(http.StatusOK)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, malformedJson)
+	respond(res, http.StatusOK, malformedJson)
+}
+
+
+/* 
+ * Writes a failed response indicating no authorization.
+ */
+func noAccessHandler (res http.ResponseWriter, req *http.Request) {
+	respond(res, http.StatusForbidden, malformedJson)
 }
 
 
@@ -177,19 +243,7 @@ func rateLimitPartialHandler (res http.ResponseWriter, req *http.Request) {
  * Writes an error response with a rate-limiting status code.
  */
 func rateLimitFullHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(429)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, createCirconusError())		// Client ignores error message
-}
-
-
-/* 
- * Writes a failed response.
- */
-func serverErrorHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(http.StatusInternalServerError)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, createCirconusError())
+	respond(res, 429, createCirconusError())
 }
 
 
@@ -197,9 +251,10 @@ func serverErrorHandler (res http.ResponseWriter, req *http.Request) {
  * Writes a successful response.
  */
 func successHandler (res http.ResponseWriter, req *http.Request) {
-	res.WriteHeader(http.StatusOK)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, successJson)
+	for k, v := range req.Header {
+		values <- item{ Key:k, Value:v[0] }
+	}
+	respond(res, http.StatusOK, successJson)
 }
 
 
@@ -208,9 +263,7 @@ func successHandler (res http.ResponseWriter, req *http.Request) {
  */
 func timeoutHandler (res http.ResponseWriter, req *http.Request) {
 	time.Sleep(time.Duration(550) * time.Millisecond)
-	res.WriteHeader(http.StatusOK)
-	res.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(res, successJson)
+	respond(res, http.StatusOK, successJson)
 }
 
 
@@ -238,6 +291,10 @@ func TestSuccess(t *testing.T) {
 	_, err := client.send(req)
 	if err != nil {
 		t.Errorf("%s\n", err.Error())
+	} else {
+		m := listener.Values()
+		expect(t, m["X-Circonus-App-Name"], "sampleapp")
+		expect(t, m["X-Circonus-Auth-Token"], "abc123")
 	}
 }
 
@@ -262,6 +319,25 @@ func TestFailure(t *testing.T) {
 			expect(t, string(decoded), createCirconusError())
 			expect(t, err.Error(), "Intential error")
 		}
+	}
+}
+
+
+func TestAccessDenied(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/no-access",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%s\n", err.Error())
+		expect(t, reflect.TypeOf(err).Name(), "AccessDeniedError")
 	}
 }
 
@@ -320,6 +396,25 @@ func TestEmptyResponse(t *testing.T) {
 	} else {
 		t.Logf("%s\n", err.Error())
 		expect(t, reflect.TypeOf(err).Name(), "EmptyResponseError")
+	}
+}
+
+
+func TestInvalidCredentials(t *testing.T) {
+	client := createClient(createTestServer())
+
+	req := request {
+		Method:			"GET",
+		Action:			"list",
+		Resource:		"/invalid-token",
+	}
+
+	_, err := client.send(req)
+	if err == nil {
+		t.Errorf("Client did not fail as expected\n")
+	} else {
+		t.Logf("%s\n", err.Error())
+		expect(t, reflect.TypeOf(err).Name(), "TokenNotValidatedError")
 	}
 }
 
