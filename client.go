@@ -1,13 +1,11 @@
 package circonus
 
 import (
-"fmt"
+//"fmt"
 	"bytes"
 	"encoding/json"
 	"net/http"
 	"time"
-
-	//"golang.org/x/net/context"
 )
 
 // Structures ============================================================ //
@@ -18,7 +16,7 @@ type Client struct {
 	app       string          // Circonus: Application name
 	host      string          // Cironus API host
 	path      string          // Base URL path of any requests made
-	results   chan result			// Used to limit client to a one request at a time
+	results   chan result     // Used to limit client to a one request at a time
 	token     string          // Circonus: API token
 	transport *http.Transport // For testing
 }
@@ -33,14 +31,19 @@ type request struct {
 
 type result struct {
 	Response	interface{}
-	Error			error
+	Error     error
 }
 
-type key int
 type resource string
 type responseHandler func(*http.Response, error) error
 
 // Errors ================================================================ //
+
+type AccessDeniedError struct {}
+
+func (e AccessDeniedError) Error() string {
+	return "Access denied"
+}
 
 type CirconusError struct {
 	Code        string `json:"code"`
@@ -97,6 +100,12 @@ func (e ResourceNotFoundError) Error() string {
 	return "Circonus endpoint \"" + e.Endpoint + "\" not found"
 }
 
+type TokenNotValidatedError struct {}
+
+func (e TokenNotValidatedError) Error() string {
+	return "Invalid authentication token"
+}
+
 // Constants & Data ====================================================== //
 
 // External constants
@@ -123,8 +132,6 @@ var (
 	default_host      string = "https://api.circonus.com"
 	supported_version string = "v2"
 	retries           int    = 5
-
-	clientTransport   key = 0
 )
 
 // Circonus API ========================================================== //
@@ -154,7 +161,6 @@ func (c *Client) send(r request) (interface{}, error) {
 				switch err.(type) {
 				case RateLimitError:
 					<- time.Tick(DEFAULT_RETRY_INTERVAL)
-					fmt.Printf("Retrying (%d)\n", i + 1)
 					if i == c.Retries - 1 {
 						err = RateLimitExceededError{}
 					}
@@ -200,6 +206,10 @@ func (c *Client) tryRequest(r request, channel chan result) (interface{}, error)
 	if err != nil {
 		return nil, err  // Should only occur with malformed request URL's
 	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Circonus-App-Name", c.app)
+	req.Header.Set("X-Circonus-Auth-Token", c.token)
 
 	// Add any querystring parameters
 	if len(r.Parameters) > 0 {
@@ -226,10 +236,14 @@ func (c *Client) tryRequest(r request, channel chan result) (interface{}, error)
 
 	// Handle errors
 	if res.StatusCode > 399 {
-		if res.StatusCode == 404 {
+		switch res.StatusCode {
+		case 401:
+			return nil, TokenNotValidatedError{}
+		case 403:
+			return nil, AccessDeniedError{}
+		case 404:
 			return nil, ResourceNotFoundError{Endpoint: r.Resource}
-		}
-		if res.StatusCode == 429 {
+		case 429:
 			return nil, RateLimitError{}
 		}
 
