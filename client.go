@@ -10,8 +10,29 @@ import (
 
 // Structures ============================================================ //
 
+// A Client is a Circonus client.  Its zero value is a usable client with
+// default timeouts and retries.
+// 
+// Although Clients should be safe for concurrent use, in practice doing so
+// will provide little benefit as Circonus rate limits use by access token.
+// 
+// Clients typically maintain internal (cached) state and so should be reused 
+// rather than created as needed.
 type Client struct {
+	// Retries specifies the number of times the Client will retry a request
+	// that has failed because of rate limiting.  After the maximum number of
+	// retries has been attempted, a RateLimitExceededError will be returned.
+	// 
+	// The default value is five attempts.
 	Retries   int
+
+	// Timeout specifies a time limit for requests made by the Client.  This
+	// includes connection time and reading the response.  The timer will
+	// interrupt request processing when exceeded, cancelling the request.
+	//
+	// A Timeout of zero means no timeout.
+	// 
+	// The default value is 30 seconds.
 	Timeout   time.Duration
 	app       string          // Circonus: Application name
 	host      string          // Cironus API host
@@ -21,31 +42,27 @@ type Client struct {
 	transport *http.Transport // For testing
 }
 
+// Internal type for encapsulating requests to send to Circonus.
 type request struct {
 	Method     string
-	Action     string
 	Resource   string
 	Data       interface{}
 	Parameters map[string]string
 }
 
+// Internal type for representing a response from Circonus.
 type result struct {
 	Response	interface{}
 	Error     error
 }
 
+// Internal type for representing valid Circonus endpoints.
 type resource string
-type responseHandler func(*http.Response, error) error
 
 // Constants & Data ====================================================== //
 
-// External constants
+// Resource endpoint designators for use with convenience functions.
 const (
-	DEFAULT_TIMEOUT        time.Duration = time.Duration(30) * time.Second
-	DEFAULT_RETRY_ATTEMPTS int = 5
-	DEFAULT_RETRY_INTERVAL time.Duration = time.Duration(1) * time.Second
-
-	// Supported resources
 	ACCOUNT        resource = "account"
 	BROKER         resource = "broker"
 	CHECK          resource = "check"
@@ -58,19 +75,22 @@ const (
 	USER           resource = "user"
 )
 
-// Internal constants
-var (
-	default_host      string = "https://api.circonus.com"
-	supported_version string = "v2"
-	retries           int    = 5
+const (
+	default_host           string = "https://api.circonus.com"
+	default_retry_attempts int = 5
+	default_retry_interval time.Duration = time.Duration(1) * time.Second
+	default_timeout        time.Duration = time.Duration(30) * time.Second
+	supported_version      string = "v2"
 )
 
 // Client API ============================================================ //
 
+// Creates a new Client for use with Circonus account matching the given
+// application identifier and account access token.
 func NewClient(appname string, apitoken string) Client {
 	return Client{
-		Retries:   DEFAULT_RETRY_ATTEMPTS,
-		Timeout:   DEFAULT_TIMEOUT,
+		Retries:   default_retry_attempts,
+		Timeout:   default_timeout,
 		app:       appname,
 		host:      default_host,
 		path:      "/" + supported_version,
@@ -80,6 +100,11 @@ func NewClient(appname string, apitoken string) Client {
 	}
 }
 
+// Send a request to Circonus and return the response it returns.
+// 
+// If Circonus throttles a request because of rate limiting, it will be
+// retried until it succeeds, errors, or exceeds the configured number of
+// retry attempts.
 func (c *Client) send(r request) (interface{}, error) {
 	var res interface{}
 	var err error
@@ -91,7 +116,7 @@ func (c *Client) send(r request) (interface{}, error) {
 			if err != nil {
 				switch err.(type) {
 				case RateLimitError:
-					<- time.Tick(DEFAULT_RETRY_INTERVAL)
+					<- time.Tick(default_retry_interval)
 					if i == c.Retries - 1 {
 						err = RateLimitExceededError{}
 					}
@@ -118,6 +143,8 @@ func (c *Client) send(r request) (interface{}, error) {
 	}
 }
 
+// Attempts to send a single request to Circonus, process its response, and
+// return the results over a given channel.
 func (c *Client) tryRequest(r request, channel chan result) (interface{}, error) {
 	var response interface{}
 
@@ -198,16 +225,3 @@ func (c *Client) tryRequest(r request, channel chan result) (interface{}, error)
 
 	return response, nil
 }
-
-// Convenience Functions ================================================= //
-
-/*
-func (c *Client) List(resource string) (interface{}, error) {
-	req := request{
-		Method:   "GET",
-		Action:   "list",
-		Resource: resource,
-	}
-	return c.send(req)
-}
-*/
