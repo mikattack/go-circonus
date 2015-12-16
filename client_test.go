@@ -282,7 +282,6 @@ func TestSuccess(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/success",
 		Data:				"test data",
 		Parameters:	map[string]string { "vegetable":"carrot", "rock":"onyx" },
@@ -304,7 +303,6 @@ func TestFailure(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/failure",
 	}
 
@@ -328,7 +326,6 @@ func TestAccessDenied(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/no-access",
 	}
 
@@ -347,7 +344,6 @@ func TestBadRequestData(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/success",
 		Data:				make(chan bool),
 	}
@@ -367,7 +363,6 @@ func TestBadResource(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/nonexistent",
 	}
 
@@ -386,7 +381,6 @@ func TestEmptyResponse(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/empty",
 	}
 
@@ -405,7 +399,6 @@ func TestInvalidCredentials(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/invalid-token",
 	}
 
@@ -424,7 +417,6 @@ func TestMalformedSuccess(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/malformed-success",
 	}
 
@@ -444,7 +436,6 @@ func TestMalformedFailure(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/malformed-failure",
 	}
 
@@ -465,7 +456,6 @@ func TestMalformedRequest(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/malformed",
 	}
 
@@ -483,7 +473,6 @@ func TestTimout(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/timeout",
 	}
 
@@ -502,7 +491,6 @@ func TestZeroTimout(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/timeout",
 	}
 
@@ -518,7 +506,6 @@ func TestFullRateLimit(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/rate-limit-full",
 	}
 
@@ -537,7 +524,6 @@ func TestPartialRateLimit(t *testing.T) {
 
 	req := request {
 		Method:			"GET",
-		Action:			"list",
 		Resource:		"/rate-limit-partial",
 	}
 
