@@ -292,6 +292,8 @@ func TestSuccess(t *testing.T) {
 		t.Errorf("%s\n", err.Error())
 	} else {
 		m := listener.Values()
+		expect(t, m["Accept"], "application/json")
+		expect(t, m["Content-Type"], "application/json")
 		expect(t, m["X-Circonus-App-Name"], "sampleapp")
 		expect(t, m["X-Circonus-Auth-Token"], "abc123")
 	}
