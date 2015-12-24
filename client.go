@@ -24,7 +24,7 @@ type Client struct {
 	// retries has been attempted, a RateLimitExceededError will be returned.
 	// 
 	// The default value is five attempts.
-	Retries   int
+	Retries int
 
 	// Timeout specifies a time limit for requests made by the Client.  This
 	// includes connection time and reading the response.  The timer will
@@ -33,13 +33,15 @@ type Client struct {
 	// A Timeout of zero means no timeout.
 	// 
 	// The default value is 30 seconds.
-	Timeout   time.Duration
-	app       string          // Circonus: Application name
-	host      string          // Cironus API host
-	path      string          // Base URL path of any requests made
-	results   chan result     // Used to limit client to a one request at a time
-	token     string          // Circonus: API token
-	transport *http.Transport // For testing
+	Timeout time.Duration
+
+	app         string          // Circonus: Application name
+	host        string          // Cironus API host
+	httpclient  *http.Client
+	path        string          // Base URL path of any requests made
+	results     chan result     // Used to limit client to a one request at a time
+	token       string          // Circonus: API token
+	transport   *http.Transport // For testing
 }
 
 // Internal type for encapsulating requests to send to Circonus.
@@ -108,6 +110,13 @@ func NewClient(appname string, apitoken string) Client {
 func (c *Client) send(r request) (interface{}, error) {
 	var res interface{}
 	var err error
+
+	if c.httpclient == nil {
+    c.httpclient = &http.Client{
+      Timeout:   c.Timeout,
+      Transport: c.transport,
+    }
+  }
 
 	go func(req request, channel chan result) {
 		for i := 0; i < c.Retries; i++ {
@@ -178,13 +187,8 @@ func (c *Client) tryRequest(r request, channel chan result) (interface{}, error)
 		req.URL.RawQuery = q.Encode()
 	}
 
-	client := &http.Client{
-		Timeout:   c.Timeout,
-		Transport: c.transport,
-	}
-
 	// Execute request
-	res, err := client.Do(req)
+	res, err := c.httpclient.Do(req)
 	if err != nil {
 		return nil, err
 	}
